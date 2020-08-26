@@ -5,7 +5,7 @@
  *  Copyright (C) 2015 Alex Hung <alex.hung@canonical.com>
  *  Copyright (C) 2015 Andrew Lutomirski <luto@kernel.org>
  */
-
+#define DEBUG 1
 #include <linux/acpi.h>
 #include <linux/dmi.h>
 #include <linux/input.h>
@@ -57,6 +57,10 @@ static const struct key_entry intel_array_keymap[] = {
 	{ KE_IGNORE, 0xC7, { KEY_VOLUMEDOWN } },              /* Release */
 	{ KE_KEY,    0xC8, { KEY_ROTATE_LOCK_TOGGLE } },      /* Press */
 	{ KE_IGNORE, 0xC9, { KEY_ROTATE_LOCK_TOGGLE } },      /* Release */
+  { KE_SW,     0xCA, { .sw = { SW_DOCK, 1 } } },    /* Docked */
+  { KE_SW,     0xCB, { .sw = { SW_DOCK, 0 } } },    /* Undocked */
+  { KE_SW,     0xCC, { .sw = { SW_TABLET_MODE, 1 } } }, /* Tablet */
+  { KE_SW,     0xCD, { .sw = { SW_TABLET_MODE, 0 } } }, /* Laptop */
 	{ KE_KEY,    0xCE, { KEY_POWER } },                   /* Press */
 	{ KE_IGNORE, 0xCF, { KEY_POWER } },                   /* Release */
 	{ KE_END },
@@ -226,6 +230,26 @@ static int intel_hid_set_enable(struct device *device, bool enable)
 	}
 
 	return 0;
+}
+
+static void intel_detect_tablet_mode(struct device *device)
+{
+  struct intel_hid_priv *priv = dev_get_drvdata(device);
+  acpi_handle handle = ACPI_HANDLE(device);
+  unsigned long long tablet_mode;
+  union acpi_object *obj;
+
+  if (!priv->array)
+    return;
+  
+  obj = acpi_evaluate_dsm(handle, &intel_dsm_guid, 1, INTEL_HID_DSM_VGBS_FN, NULL);
+  if (obj && obj->type == ACPI_TYPE_INTEGER) {
+    tablet_mode = obj->integer.value;
+    dev_dbg(device, "read tablet mode: %llu", tablet_mode);
+    input_report_switch(priv->array, SW_TABLET_MODE, tablet_mode? 0:1);
+    input_report_switch(priv->array, SW_DOCK, tablet_mode? 1:0);
+    ACPI_FREE(obj);
+  }
 }
 
 static void intel_button_array_enable(struct device *device, bool enable)
@@ -474,6 +498,8 @@ static int intel_hid_probe(struct platform_device *device)
 		err = intel_button_array_input_setup(device);
 		if (err)
 			pr_err("Failed to setup Intel 5 button array hotkeys\n");
+    else
+     intel_detect_tablet_mode(&device->dev);
 	}
 
 	status = acpi_install_notify_handler(handle,
