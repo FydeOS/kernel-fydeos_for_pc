@@ -332,6 +332,37 @@ static int accel_3d_parse_report(struct platform_device *pdev,
 	return ret;
 }
 
+static irqreturn_t accel_3d_trigger_handler(int irq, void *p) {
+  struct iio_poll_func *pf = p;
+  struct iio_dev *indio_dev = pf->indio_dev;
+  struct accel_3d_state *accel_state = iio_priv(indio_dev);
+  struct hid_sensor_hub_device *hsdev = accel_state->common_attributes.hsdev;
+  int report_id = -1, i;
+  s32 min;
+  u32 address;
+  int scan_index;
+
+  dev_dbg(&indio_dev->dev, "accel_3d_trigger_handler\n");
+  hid_sensor_power_state(&accel_state->common_attributes, true);
+  for (i = 0; i < indio_dev->num_channels; i++) {
+    scan_index = indio_dev->channels[i].scan_index;
+    report_id = accel_state->accel[scan_index].report_id;
+    if (report_id < 0) {
+      hid_sensor_power_state(&accel_state->common_attributes, false);
+      goto err;
+    }
+    min = accel_state->accel[scan_index].logical_minimum;
+    address = accel_3d_addresses[scan_index];
+    sensor_hub_input_attr_get_raw_value(
+          hsdev, hsdev->usage, address, report_id, SENSOR_HUB_SYNC,
+          min < 0);
+  }
+  hid_sensor_power_state(&accel_state->common_attributes, false);
+err:
+  iio_trigger_notify_done(indio_dev->trig);
+  return IRQ_HANDLED;
+}
+
 /* Function to initialize the processing for usage id */
 static int hid_accel_3d_probe(struct platform_device *pdev)
 {
@@ -392,7 +423,7 @@ static int hid_accel_3d_probe(struct platform_device *pdev)
 	indio_dev->modes = INDIO_DIRECT_MODE;
 
 	ret = iio_triggered_buffer_setup(indio_dev, &iio_pollfunc_store_time,
-		NULL, NULL);
+		&accel_3d_trigger_handler, NULL);
 	if (ret) {
 		dev_err(&pdev->dev, "failed to initialize trigger buffer\n");
 		goto error_free_dev_mem;
