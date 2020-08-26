@@ -69,6 +69,8 @@ MODULE_LICENSE("GPL");
 #define MT_QUIRK_ASUS_CUSTOM_UP		BIT(17)
 #define MT_QUIRK_WIN8_PTP_BUTTONS	BIT(18)
 #define MT_QUIRK_SEPARATE_APP_REPORT	BIT(19)
+#define MT_QUIRK_INVERT_X BIT(20)
+#define MT_QUIRK_INVERT_Y BIT(21)
 
 #define MT_INPUTMODE_TOUCHSCREEN	0x02
 #define MT_INPUTMODE_TOUCHPAD		0x03
@@ -133,6 +135,9 @@ struct mt_application {
 	int prev_scantime;		/* scantime reported previously */
 
 	bool have_contact_count;
+  bool pressure_emulate;
+  __s32 fake_pressure;
+  int pressure_step;
 };
 
 struct mt_class {
@@ -189,6 +194,7 @@ static void mt_post_parse(struct mt_device *td, struct mt_application *app);
 #define MT_CLS_WIN_8				0x0012
 #define MT_CLS_EXPORT_ALL_INPUTS		0x0013
 #define MT_CLS_WIN_8_DUAL			0x0014
+#define MT_CLS_GOODIX       0x0015
 
 /* vendor specific classes */
 #define MT_CLS_3M				0x0101
@@ -268,6 +274,16 @@ static const struct mt_class mt_classes[] = {
 			MT_QUIRK_STICKY_FINGERS |
 			MT_QUIRK_WIN8_PTP_BUTTONS,
 		.export_all_inputs = true },
+  { .name = MT_CLS_GOODIX,
+    .quirks = MT_QUIRK_INVERT_Y |
+      MT_QUIRK_INVERT_X |
+      MT_QUIRK_ALWAYS_VALID |
+      MT_QUIRK_IGNORE_DUPLICATES |
+      MT_QUIRK_HOVERING |
+      MT_QUIRK_CONTACT_CNT_ACCURATE |
+      MT_QUIRK_STICKY_FINGERS |
+      MT_QUIRK_WIN8_PTP_BUTTONS,
+    .export_all_inputs = true},
 	{ .name = MT_CLS_EXPORT_ALL_INPUTS,
 		.quirks = MT_QUIRK_ALWAYS_VALID |
 			MT_QUIRK_CONTACT_CNT_ACCURATE,
@@ -767,6 +783,15 @@ static int mt_touch_input_mapping(struct hid_device *hdev, struct hid_input *hi,
 						     MT_TOOL_PALM, 0, 0);
 
 			MT_STORE_FIELD(confidence_state);
+      if (app->application == HID_DG_TOUCHPAD &&
+					 (cls->name == MT_CLS_DEFAULT || cls->name == MT_CLS_WIN_8) &&
+					 !test_bit(ABS_MT_PRESSURE, hi->input->absbit)){
+         app->pressure_emulate = true;
+         app->fake_pressure = 0;
+         input_set_abs_params(hi->input, ABS_MT_PRESSURE, 0, 255, 0, 0);
+         mt_store_field(hdev, app, &app->fake_pressure, offsetof(struct mt_usages, p));
+         hid_dbg(hdev, "Set device pressure_emulate enable");
+      }
 			return 1;
 		case HID_DG_TIPSWITCH:
 			if (field->application != HID_GD_SYSTEM_MULTIAXIS)
@@ -1074,7 +1099,26 @@ static int mt_process_slot(struct mt_device *td, struct input_dev *input,
 			minor = minor >> 1;
 		}
 
+    hid_dbg(td->hdev, "emulate:%x,x:%d, pressure:%d",
+      app->pressure_emulate, *slot->x, *slot->p);
+    if (app->pressure_emulate && slot->x) {
+      if (app->fake_pressure > 130)
+        app->pressure_step = -10;
+      else if (app->fake_pressure < 60)
+        app->pressure_step = 30;
+      else if (app->fake_pressure > 80)
+        app->pressure_step = 5;
+		  app->fake_pressure += app->pressure_step;
+	  }
+    if (quirks & MT_QUIRK_INVERT_X)
+      input_event(input, EV_ABS, ABS_MT_POSITION_X, 
+        input_abs_get_max(input, ABS_MT_POSITION_X) - *slot->x);
+    else
 		input_event(input, EV_ABS, ABS_MT_POSITION_X, *slot->x);
+    if (quirks & MT_QUIRK_INVERT_Y)
+      input_event(input, EV_ABS, ABS_MT_POSITION_Y,
+        input_abs_get_max(input, ABS_MT_POSITION_Y) - *slot->y);
+    else
 		input_event(input, EV_ABS, ABS_MT_POSITION_Y, *slot->y);
 		input_event(input, EV_ABS, ABS_MT_TOOL_X, *slot->cx);
 		input_event(input, EV_ABS, ABS_MT_TOOL_Y, *slot->cy);
@@ -1125,7 +1169,17 @@ static void mt_process_mt_event(struct hid_device *hid,
 			return;
 		}
 	}
-
+  /*
+  hid_info(hid, "usage type:%d, usage code:%d", usage->type, usage->code);
+  if ( usage->type == EV_ABS && (quirks & MT_QUIRK_INVERT_X &  MT_QUIRK_INVERT_Y) && 
+    (usage->code == ABS_MT_POSITION_X || usage->code == ABS_X || 
+     usage->code == ABS_MT_POSITION_Y || usage->code == ABS_Y)){
+    hid_info(hid, "logical max:%d, physical max:%d, value:%d", field->logical_maximum, 
+      field->physical_minimum, value);
+    input_event(input, usage->type, usage->code, field->logical_maximum - value);
+  }
+  else
+  */
 	input_event(input, usage->type, usage->code, value);
 }
 
@@ -1302,9 +1356,11 @@ static int mt_input_mapping(struct hid_device *hdev, struct hid_input *hi,
 	    field->application != HID_DG_TOUCHSCREEN &&
 	    field->application != HID_DG_PEN &&
 	    field->application != HID_DG_TOUCHPAD &&
+       field->application != HID_GD_MOUSE &&
 	    field->application != HID_GD_KEYBOARD &&
 	    field->application != HID_GD_SYSTEM_CONTROL &&
 	    field->application != HID_CP_CONSUMER_CONTROL &&
+      field->application != HID_DG_TOUCHSCREEN &&
 	    field->application != HID_GD_WIRELESS_RADIO_CTLS &&
 	    field->application != HID_GD_SYSTEM_MULTIAXIS &&
 	    !(field->application == HID_VD_ASUS_CUSTOM_MEDIA_KEYS &&
@@ -1355,6 +1411,13 @@ static int mt_input_mapped(struct hid_device *hdev, struct hid_input *hi,
 {
 	struct mt_device *td = hid_get_drvdata(hdev);
 	struct mt_report_data *rdata;
+
+	if (field->application == HID_DG_TOUCHSCREEN ||
+			field->application == HID_DG_TOUCHPAD) {
+		if (usage->type == EV_KEY || usage->type == EV_ABS)
+			set_bit(usage->type, hi->input->evbit);
+		return -1;
+	}
 
 	rdata = mt_find_report_data(td, field->report);
 	if (rdata && rdata->is_mt_collection) {
@@ -1569,16 +1632,19 @@ static int mt_input_configured(struct hid_device *hdev, struct hid_input *hi)
 	case HID_DG_TOUCHSCREEN:
 		/* we do not set suffix = "Touchscreen" */
 		hi->input->name = hdev->name;
+    hid_info(hdev, "set touchscreen mtclass:%d", td->mtclass.name);
 		break;
 	case HID_DG_STYLUS:
 		/* force BTN_STYLUS to allow tablet matching in udev */
 		__set_bit(BTN_STYLUS, hi->input->keybit);
+    __set_bit(INPUT_PROP_DIRECT, hi->input->propbit);
 		break;
 	case HID_VD_ASUS_CUSTOM_MEDIA_KEYS:
 		suffix = "Custom Media Keys";
 		break;
 	case HID_DG_PEN:
 		suffix = "Stylus";
+    hid_info(hdev, "set stylus mtclass:%d", td->mtclass.name);
 		break;
 	default:
 		suffix = "UNKNOWN";
@@ -1989,6 +2055,63 @@ static const struct hid_device_id mt_devices[] = {
 		HID_DEVICE(BUS_I2C, HID_GROUP_GENERIC,
 			USB_VENDOR_ID_LG, I2C_DEVICE_ID_LG_7010) },
 
+ /* Microsoft Touch Cover */
+ { .driver_data = MT_CLS_EXPORT_ALL_INPUTS,
+           MT_USB_DEVICE(USB_VENDOR_ID_MICROSOFT,
+           USB_DEVICE_ID_MS_TOUCH_COVER_2) },
+
+   /* Microsoft Type Cover */
+   { .driver_data = MT_CLS_EXPORT_ALL_INPUTS,
+           MT_USB_DEVICE(USB_VENDOR_ID_MICROSOFT,
+                   USB_DEVICE_ID_MS_TYPE_COVER_2) },
+   { .driver_data = MT_CLS_EXPORT_ALL_INPUTS,
+           MT_USB_DEVICE(USB_VENDOR_ID_MICROSOFT,
+                   USB_DEVICE_ID_MS_TYPE_COVER_3) },
+   { .driver_data = MT_CLS_EXPORT_ALL_INPUTS,
+           MT_USB_DEVICE(USB_VENDOR_ID_MICROSOFT,
+                   USB_DEVICE_ID_MS_TYPE_COVER_PRO_3) },
+   { .driver_data = MT_CLS_EXPORT_ALL_INPUTS,
+           MT_USB_DEVICE(USB_VENDOR_ID_MICROSOFT,
+                   USB_DEVICE_ID_MS_TYPE_COVER_PRO_3_1) },
+   { .driver_data = MT_CLS_EXPORT_ALL_INPUTS,
+           MT_USB_DEVICE(USB_VENDOR_ID_MICROSOFT,
+                   USB_DEVICE_ID_MS_TYPE_COVER_PRO_3_2) },
+   { .driver_data = MT_CLS_EXPORT_ALL_INPUTS,
+           MT_USB_DEVICE(USB_VENDOR_ID_MICROSOFT,
+                   USB_DEVICE_ID_MS_TYPE_COVER_PRO_3_JP) },
+   { .driver_data = MT_CLS_EXPORT_ALL_INPUTS,
+           MT_USB_DEVICE(USB_VENDOR_ID_MICROSOFT,
+                   USB_DEVICE_ID_MS_TYPE_COVER_PRO_4) },
+   { .driver_data = MT_CLS_EXPORT_ALL_INPUTS,
+           MT_USB_DEVICE(USB_VENDOR_ID_MICROSOFT,
+                   USB_DEVICE_ID_MS_TYPE_COVER_PRO_4_1) },
+
+   /* Microsoft Surface Book */
+   { .driver_data = MT_CLS_EXPORT_ALL_INPUTS,
+           MT_USB_DEVICE(USB_VENDOR_ID_MICROSOFT,
+           USB_DEVICE_ID_MS_SURFACE_BOOK) },
+
+   /* Microsoft Surface Book 2 */
+   { .driver_data = MT_CLS_EXPORT_ALL_INPUTS,
+           MT_USB_DEVICE(USB_VENDOR_ID_MICROSOFT,
+           USB_DEVICE_ID_MS_SURFACE_BOOK_2) },
+
+   /* Microsoft Surface Go */
+   { .driver_data = MT_CLS_EXPORT_ALL_INPUTS,
+           MT_USB_DEVICE(USB_VENDOR_ID_MICROSOFT,
+           USB_DEVICE_ID_MS_SURFACE_GO) },
+
+   /* Microsoft Surface Laptop */
+   { .driver_data = MT_CLS_EXPORT_ALL_INPUTS,
+           HID_DEVICE(HID_BUS_ANY, HID_GROUP_ANY,
+                   USB_VENDOR_ID_MICROSOFT,
+                   USB_DEVICE_ID_MS_SURFACE_VHF) },
+
+   /* Microsoft Power Cover */
+   { .driver_data = MT_CLS_EXPORT_ALL_INPUTS,
+           MT_USB_DEVICE(USB_VENDOR_ID_MICROSOFT,
+           USB_DEVICE_ID_MS_POWER_COVER) },
+
 	/* MosArt panels */
 	{ .driver_data = MT_CLS_CONFIDENCE_MINUS_ONE,
 		MT_USB_DEVICE(USB_VENDOR_ID_ASUS,
@@ -2124,6 +2247,9 @@ static const struct hid_device_id mt_devices[] = {
 	{ HID_DEVICE(HID_BUS_ANY, HID_GROUP_MULTITOUCH, HID_ANY_ID, HID_ANY_ID) },
 
 	/* Generic Win 8 certified MT device */
+  {  .driver_data = MT_CLS_GOODIX,
+    HID_DEVICE(BUS_I2C, HID_GROUP_MULTITOUCH_WIN_8,
+      I2C_VENDOR_ID_GOODIX, I2C_DEVICE_ID_WEIBU) },
 	{  .driver_data = MT_CLS_WIN_8,
 		HID_DEVICE(HID_BUS_ANY, HID_GROUP_MULTITOUCH_WIN_8,
 			HID_ANY_ID, HID_ANY_ID) },
