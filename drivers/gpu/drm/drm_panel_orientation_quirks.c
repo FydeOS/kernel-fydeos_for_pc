@@ -211,7 +211,13 @@ static const struct dmi_system_id orientation_data[] = {
 		  DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "LTH17"),
 		},
 		.driver_data = (void *)&lcd800x1280_rightside_up,
-	},
+	}, { /*weibu tablet */
+    .matches = {
+      DMI_EXACT_MATCH(DMI_BIOS_VENDOR, "American Megatrends Inc."),
+      DMI_EXACT_MATCH(DMI_BIOS_VERSION, "SF133AR200_R11_Mipi"),
+    },
+    .driver_data = (void *)&asus_t100ha,
+  },
 	{}
 };
 
